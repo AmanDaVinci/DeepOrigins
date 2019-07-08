@@ -79,8 +79,21 @@ def get_dataloaders(x_train, y_train, x_test, y_test, batch_size):
     test_dl = DataLoader(test_ds, batch_size*2, shuffle=False)
     return train_dl, test_dl
 
-# ---
-#
-# ---
+class Databunch:
 
+    def __init__(self, train_dl, test_dl, n_classes=None):
+        self.train_dl, self.test_dl = train_dl, test_dl
+        self.n_classes = n_classes
+    
+    @property
+    def train_ds(self): return self.train_dl.dataset
+
+    @property
+    def test_ds(self):  return self.test_dl.dataset
+
+
+class Learner():
+    def __init__(self, model, data, optimizer, loss_func):
+        self.model, self.data = model, data
+        self.opt, self.loss_func = optimizer, loss_func
 
