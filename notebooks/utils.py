@@ -45,6 +45,10 @@ def get_data():
                               x_train.shape[1]*x_train.shape[2])
     x_test = x_test.reshape(x_test.shape[0],
                             x_test.shape[1]*x_test.shape[2])
+    mean = x_train.mean()
+    std = x_train.std()
+    x_train = normalize(x_train, mean, std)
+    x_test = normalize(x_test, mean, std)
     return x_train, y_train, x_test, y_test
 
 # ---
@@ -97,3 +101,151 @@ class Learner():
         self.model, self.data = model, data
         self.opt, self.loss_func = optimizer, loss_func
 
+# ---
+# 05_Customize-Training-with-Callbacks
+# ---
+
+import re
+
+def camel2snake(name):
+    _camel_r1 = "(.)([A-Z][a-z]+)"
+    _camel_r2 = "([a-z0-9])([A-Z])"
+    s1 = re.sub(_camel_r1, r'\1_\2', name)
+    return re.sub(_camel_r2, r'\1_\2', s1).lower()
+
+
+class Callback:
+    '''Abstract Callback Class'''
+    _order = 0
+    
+    def set_controller(self, control):  self.control = control
+    def __getattr__(self, attr):        return getattr(self.control, attr)
+    @property
+    def name(self):                     return camel2snake(name or 'callback')
+
+
+class Controller:
+    '''Main Controller responsible for callbacks and training loop'''
+    
+    def __init__(self, callback_list=[]):
+        self.cbs = [TrainEval()] + callback_list
+        self.stop = False
+    
+    @property
+    def model(self):     return self.learner.model
+    @property
+    def data(self):      return self.learner.data
+    @property
+    def opt(self):       return self.learner.opt
+    @property
+    def loss_func(self): return self.learner.loss_func
+
+    def run_one_batch(self, xb, yb):
+        self.xb, self.yb = xb, yb
+        if self('before_batch'): return
+        self.pred = self.learner.model(self.xb)
+        if self('after_pred'): return
+        self.loss = self.learner.loss_func(self.pred, self.yb)
+        if self('after_loss') or not self.in_train: return
+        self.loss.backward()
+        if self('after_backward'): return
+        self.learner.opt.step()
+        if self('after_step'): return
+        self.learner.opt.zero_grad()
+        self('after_batch')
+        
+    def run_all_batches(self, dl):
+        self.iters = len(dl)
+        for xb, yb in dl:
+            if self.stop: break
+            self.run_one_batch(xb, yb)
+        self.stop = False
+    
+    def train(self, learner, epochs):
+        self.learner, self.epochs = learner, epochs
+        try:
+            for cb in self.cbs: 
+                cb.set_controller(self)
+            if self('before_train'): return
+            for epoch in range(self.epochs):
+                self.epoch = epoch
+                if not self('before_epoch'):
+                    self.run_all_batches(self.data.train_dl)
+                with torch.no_grad():
+                    if not self('before_validate'):
+                        self.run_all_batches(self.data.test_dl)
+                if self('after_epoch'): break
+        finally:
+            self('after_train')
+    
+    def __call__(self, cb_func_name):
+        for cb in sorted(self.cbs, key=lambda x: x._order):
+            # get the callback function if defined or else None 
+            cb_func = getattr(cb, cb_func_name, None)
+            # returns True if func is defined & also returns True
+            if cb_func and cb_func(): return True
+        # if func is defined & returns None
+        return False
+
+
+class TrainEval(Callback):
+    """
+    Callback to switch between train and eval mode,
+    as well as keep track of iterations during training.
+    
+    Note: This callback is attached by default
+    """
+    
+    def before_train(self):
+        self.control.n_epochs = 0.
+        self.control.n_iter = 0.
+    
+    def before_epoch(self):
+        self.control.model.train()
+        self.control.in_train = True
+        self.control.n_epochs = self.control.epoch
+    
+    def before_batch(self):
+        if not self.control.in_train: return
+        self.control.n_epochs += 1./self.control.iters
+        self.control.n_iter += 1
+    
+    def before_validate(self):
+        self.control.model.eval()
+        self.control.in_train = False
+
+
+class StatsReporter(Callback):
+    '''Report training statistics in terms of the given metrics'''
+    
+    def __init__(self, metrics):
+        self.metrics = [] if metrics is None else metrics
+            
+    def before_epoch(self):
+        self.train_loss, self.valid_loss = 0., 0.
+        self.train_metrics = torch.tensor([0.]).expand(len(self.metrics))
+        self.valid_metrics = torch.tensor([0.]).expand(len(self.metrics))
+        self.train_count, self.valid_count = 0, 0
+    
+    def after_loss(self):
+        batch_len = self.control.xb.shape[0]
+        if self.control.in_train:
+            self.train_count += batch_len
+            self.train_loss += self.control.loss*batch_len
+            self.train_metrics += torch.tensor([m(self.control.pred,self.control.yb)*batch_len\
+                                                for m in self.metrics])
+        else:
+            self.valid_count += batch_len
+            self.valid_loss += self.control.loss*batch_len
+            self.valid_metrics += torch.tensor([m(self.control.pred,self.control.yb)*batch_len\
+                                                for m in self.metrics])
+        
+    def after_epoch(self):
+        header = f"EPOCH#{self.control.epoch} \t"
+        train_avg_loss = self.train_loss / self.train_count
+        valid_avg_loss = self.valid_loss / self.valid_count
+        train_avg_metrics = self.train_metrics.numpy() / self.train_count
+        valid_avg_metrics = self.valid_metrics.numpy() / self.valid_count
+        train_str = f"Train loss: {train_avg_loss:.3f} \t metrics: {train_avg_metrics} \t"
+        valid_str = f"Valid loss: {valid_avg_loss:.3f} \t metrics: {valid_avg_metrics} \t"
+        print(header + train_str + valid_str)
