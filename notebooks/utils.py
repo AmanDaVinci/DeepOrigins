@@ -121,7 +121,7 @@ class Callback:
     def set_controller(self, control):  self.control = control
     def __getattr__(self, attr):        return getattr(self.control, attr)
     @property
-    def name(self):                     return camel2snake(name or 'callback')
+    def name(self):                     return camel2snake(self.__class__.__name__ or 'callback')
 
 
 class Controller:
@@ -129,6 +129,7 @@ class Controller:
     
     def __init__(self, callback_list=[]):
         self.cbs = [TrainEval()] + callback_list
+        for cb in self.cbs: setattr(self, cb.name, cb)
         self.stop = False
     
     @property
