@@ -122,7 +122,15 @@ class Callback:
     def __getattr__(self, attr):        return getattr(self.control, attr)
     @property
     def name(self):                     return camel2snake(self.__class__.__name__ or 'callback')
+    
+    def __call__(self, cb_name):
+        cb_func = getattr(self, cb_name, None)
+        if cb_func and cb_func(): return True
+        return False
 
+class CancelTrainExpection(Exception): pass
+class CancelEpochExpection(Exception): pass
+class CancelBatchExpection(Exception): pass
 
 class Controller:
     '''Main Controller responsible for callbacks and training loop'''
@@ -130,7 +138,6 @@ class Controller:
     def __init__(self, callback_list=[]):
         self.cbs = [TrainEval()] + callback_list
         for cb in self.cbs: setattr(self, cb.name, cb)
-        self.stop = False
     
     @property
     def model(self):     return self.learner.model
@@ -142,25 +149,26 @@ class Controller:
     def loss_func(self): return self.learner.loss_func
 
     def run_one_batch(self, xb, yb):
-        self.xb, self.yb = xb, yb
-        if self('before_batch'): return
-        self.pred = self.learner.model(self.xb)
-        if self('after_pred'): return
-        self.loss = self.learner.loss_func(self.pred, self.yb)
-        if self('after_loss') or not self.in_train: return
-        self.loss.backward()
-        if self('after_backward'): return
-        self.learner.opt.step()
-        if self('after_step'): return
-        self.learner.opt.zero_grad()
-        self('after_batch')
+        try:
+            self.xb, self.yb = xb, yb
+            if self('before_batch'): return
+            self.pred = self.model(self.xb)
+            if self('after_pred'): return
+            self.loss = self.loss_func(self.pred, self.yb)
+            if self('after_loss') or not self.in_train: return
+            self.loss.backward()
+            if self('after_backward'): return
+            self.opt.step()
+            if self('after_step'): return
+            self.opt.zero_grad()
+        except CancelBatchExpection: self('after_cancel_batch')
+        finally:                     self('after_batch')
         
     def run_all_batches(self, dl):
         self.iters = len(dl)
-        for xb, yb in dl:
-            if self.stop: break
-            self.run_one_batch(xb, yb)
-        self.stop = False
+        try:
+            for xb, yb in dl: self.run_one_batch(xb, yb)
+        except CancelEpochExpection: self('after_cancel_epoch')
     
     def train(self, learner, epochs):
         self.learner, self.epochs = learner, epochs
@@ -176,18 +184,31 @@ class Controller:
                     if not self('before_validate'):
                         self.run_all_batches(self.data.test_dl)
                 if self('after_epoch'): break
-        finally:
-            self('after_train')
+        except CancelTrainExpection: self('after_cancel_train') 
+        finally:                     self('after_train')
     
     def __call__(self, cb_func_name):
+        to_stop = True
         for cb in sorted(self.cbs, key=lambda x: x._order):
-            # get the callback function if defined or else None 
-            cb_func = getattr(cb, cb_func_name, None)
-            # returns True if func is defined & also returns True
-            if cb_func and cb_func(): return True
-        # if func is defined & returns None
-        return False
+            to_stop = cb(cb_func_name) and to_stop
+        return to_stop
 
+class Test(Callback):
+    '''Stops training after the given number of batches'''
+    
+    _order = 1
+    
+    def __init__(self, stop_at=10):
+        self.stop_at, self.count = stop_at, 0
+    
+    def before_batch(self):
+        self.count += 1
+        print(self.count)
+        if self.count >= self.stop_at:
+            raise CancelTrainExpection()
+    
+    def after_cancel_train(self):
+        print(f"Training has been stopped by {self.__class__.__name__} callback")
 
 class TrainEval(Callback):
     """
