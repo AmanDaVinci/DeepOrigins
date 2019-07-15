@@ -172,6 +172,7 @@ class Controller:
     
     def train(self, learner, epochs):
         self.learner, self.epochs = learner, epochs
+        self.loss = torch.tensor(0.)
         try:
             for cb in self.cbs: 
                 cb.set_controller(self)
